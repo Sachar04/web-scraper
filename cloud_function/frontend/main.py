@@ -161,18 +161,18 @@ HTML_PAGE = """<!DOCTYPE html>
         <p class="subtitle">Enter a hashtag to crawl images from Mastodon</p>
 
         <form method="POST" class="search-box">
-            <input type="text" name="hashtag" placeholder="#cats, #nature, #art..." value="{hashtag_value}" required>
+            <input type="text" name="hashtag" placeholder="#cats, #nature, #art..." value="%%HASHTAG_VALUE%%" required>
             <button type="submit">Crawl Images</button>
         </form>
 
-        {status_html}
+        %%STATUS_HTML%%
 
         <h2 style="margin-bottom: 1rem; color: #aaa;">Crawled Images</h2>
         <div class="gallery">
-            {gallery_html}
+            %%GALLERY_HTML%%
         </div>
 
-        {empty_state}
+        %%EMPTY_STATE%%
 
         <div class="info">
             <p>Powered by Mastodon API | Images stored in Google Cloud Storage</p>
@@ -307,11 +307,11 @@ def handle_request(request):
             gallery_html = ""
             empty_state = '<div class="empty-state">No images crawled yet. Enter a hashtag above to start!</div>'
 
-        html = HTML_PAGE.format(
-            hashtag_value=hashtag_value,
-            status_html=status_html,
-            gallery_html=gallery_html,
-            empty_state=empty_state,
+        html = (HTML_PAGE
+            .replace("%%HASHTAG_VALUE%%", hashtag_value)
+            .replace("%%STATUS_HTML%%", status_html)
+            .replace("%%GALLERY_HTML%%", gallery_html)
+            .replace("%%EMPTY_STATE%%", empty_state)
         )
 
         return html, 200, {"Content-Type": "text/html"}
