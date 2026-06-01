@@ -16,7 +16,7 @@ if [ -d "$REPO_DIR" ]; then
     git pull
 else
     echo "[Setup] Cloning repository..."
-    # REPLACE with your actual GitHub repo URL:
+   
     git clone https://github.com/Sachar04/web-scraper.git "$REPO_DIR"
     cd "$REPO_DIR"
 fi

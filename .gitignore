@@ -23,6 +23,9 @@ output/
 *.swp
 *.swo
 
+# ZIP
+*.zip
+
 # OS
 Thumbs.db
 .DS_Store
