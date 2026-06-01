@@ -11,6 +11,9 @@ build/
 venv/
 env/
 
+# .env file
+.env
+
 # Output data (generated at runtime)
 output/
 
