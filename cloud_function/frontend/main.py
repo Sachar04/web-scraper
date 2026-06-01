@@ -2,12 +2,13 @@
 Frontend Cloud Function — Tweet/Toot Crawler Web Interface
 HTTP-triggered. Serves a web page where users can:
   1. Enter a hashtag to crawl images from Mastodon
-  2. View previously crawled images as thumbnails
+  2. View crawled images as thumbnails (only for the searched hashtag)
+  3. Download images directly by clicking them
 
 GCP Resources:
   - This function (Cloud Functions - serverless compute)
   - Pub/Sub (publishes crawl tasks for image URLs)
-  - Cloud Storage (reads stored images for thumbnail display)
+  - Cloud Storage (stores and serves downloaded images)
 """
 
 import json
@@ -41,7 +42,7 @@ PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "crawl-tasks")
 PROJECT_ID = os.environ.get("GCP_PROJECT", "")
 
 
-# ─── HTML Templates ──────────────────────────────────────────
+# ─── HTML Page (Single Page App with JavaScript fetch) ────────
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -79,7 +80,7 @@ HTML_PAGE = """<!DOCTYPE html>
             margin-bottom: 2rem;
             flex-wrap: wrap;
         }
-        input[type="text"] {
+        #hashtag-input {
             padding: 0.8rem 1.5rem;
             font-size: 1.1rem;
             border: 2px solid #333;
@@ -90,7 +91,7 @@ HTML_PAGE = """<!DOCTYPE html>
             outline: none;
             transition: border-color 0.3s;
         }
-        input[type="text"]:focus { border-color: #7b2ff7; }
+        #hashtag-input:focus { border-color: #7b2ff7; }
         button {
             padding: 0.8rem 2rem;
             font-size: 1.1rem;
@@ -103,43 +104,62 @@ HTML_PAGE = """<!DOCTYPE html>
             transition: transform 0.2s, opacity 0.2s;
         }
         button:hover { transform: scale(1.05); opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
         .status {
             text-align: center;
             padding: 1rem;
             margin-bottom: 1.5rem;
             border-radius: 8px;
-            background: rgba(123, 47, 247, 0.1);
-            border: 1px solid rgba(123, 47, 247, 0.3);
         }
-        .status.success { background: rgba(0, 210, 255, 0.1); border-color: rgba(0, 210, 255, 0.3); }
-        .status.error { background: rgba(255, 50, 50, 0.1); border-color: rgba(255, 50, 50, 0.3); }
+        .status.success { background: rgba(0, 210, 255, 0.1); border: 1px solid rgba(0, 210, 255, 0.3); }
+        .status.error { background: rgba(255, 50, 50, 0.1); border: 1px solid rgba(255, 50, 50, 0.3); }
+        .status.loading { background: rgba(123, 47, 247, 0.1); border: 1px solid rgba(123, 47, 247, 0.3); }
         .gallery {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 1rem;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 1.2rem;
+            margin-top: 1rem;
         }
-        .gallery img {
-            width: 100%;
-            height: 200px;
-            object-fit: cover;
-            border-radius: 8px;
+        .gallery-item {
+            position: relative;
+            border-radius: 10px;
+            overflow: hidden;
             border: 2px solid #333;
             transition: transform 0.3s, border-color 0.3s;
         }
-        .gallery img:hover { transform: scale(1.05); border-color: #7b2ff7; }
-        .gallery-item {
-            position: relative;
+        .gallery-item:hover { transform: scale(1.03); border-color: #7b2ff7; }
+        .gallery-item img {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            display: block;
         }
-        .gallery-item .label {
+        .gallery-item .overlay {
             position: absolute;
-            bottom: 8px;
-            left: 8px;
-            background: rgba(0,0,0,0.7);
-            padding: 2px 8px;
-            border-radius: 4px;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 8px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .gallery-item .overlay .tag {
             font-size: 0.75rem;
             color: #ccc;
         }
+        .gallery-item .overlay .download-btn {
+            padding: 4px 10px;
+            font-size: 0.7rem;
+            border-radius: 4px;
+            background: rgba(0,210,255,0.8);
+            color: #fff;
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+        }
+        .gallery-item .overlay .download-btn:hover { background: rgba(0,210,255,1); }
         .empty-state {
             text-align: center;
             padding: 3rem;
@@ -150,9 +170,20 @@ HTML_PAGE = """<!DOCTYPE html>
             text-align: center;
             margin-top: 2rem;
             padding: 1rem;
-            color: #666;
+            color: #555;
             font-size: 0.85rem;
         }
+        .spinner {
+            display: inline-block;
+            width: 18px; height: 18px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-top-color: #00d2ff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -160,40 +191,103 @@ HTML_PAGE = """<!DOCTYPE html>
         <h1>Tweet/Toot Crawler</h1>
         <p class="subtitle">Enter a hashtag to crawl images from Mastodon</p>
 
-        <form method="POST" class="search-box">
-            <input type="text" name="hashtag" placeholder="#cats, #nature, #art..." value="%%HASHTAG_VALUE%%" required>
-            <button type="submit">Crawl Images</button>
-        </form>
-
-        %%STATUS_HTML%%
-
-        <h2 style="margin-bottom: 1rem; color: #aaa;">Crawled Images</h2>
-        <div class="gallery">
-            %%GALLERY_HTML%%
+        <div class="search-box">
+            <input type="text" id="hashtag-input" placeholder="#cats, #nature, #art..." autocomplete="off">
+            <button id="crawl-btn" onclick="crawlImages()">Crawl Images</button>
         </div>
 
-        %%EMPTY_STATE%%
+        <div id="status"></div>
+
+        <h2 id="gallery-title" style="margin-bottom: 0.5rem; color: #aaa; display: none;"></h2>
+        <div id="gallery" class="gallery"></div>
+        <div id="empty-state" class="empty-state">Enter a hashtag above and click "Crawl Images" to start!</div>
 
         <div class="info">
             <p>Powered by Mastodon API | Images stored in Google Cloud Storage</p>
             <p>Parallel crawling via Cloud Functions + Pub/Sub</p>
         </div>
     </div>
+
+    <script>
+        const input = document.getElementById('hashtag-input');
+        const btn = document.getElementById('crawl-btn');
+        const statusEl = document.getElementById('status');
+        const gallery = document.getElementById('gallery');
+        const galleryTitle = document.getElementById('gallery-title');
+        const emptyState = document.getElementById('empty-state');
+
+        input.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); crawlImages(); }
+        });
+
+        async function crawlImages() {
+            const hashtag = input.value.trim();
+            if (!hashtag) {
+                statusEl.innerHTML = '<div class="status error">Please enter a hashtag.</div>';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Crawling...';
+            statusEl.innerHTML = '<div class="status loading"><span class="spinner"></span> Searching Mastodon for #' + hashtag.replace('#','') + '...</div>';
+            gallery.innerHTML = '';
+            galleryTitle.style.display = 'none';
+            emptyState.style.display = 'none';
+
+            try {
+                const resp = await fetch('?action=crawl&hashtag=' + encodeURIComponent(hashtag));
+                const data = await resp.json();
+
+                if (data.error) {
+                    statusEl.innerHTML = '<div class="status error">' + data.error + '</div>';
+                    emptyState.style.display = 'block';
+                    emptyState.textContent = 'No images found. Try another hashtag.';
+                } else {
+                    const count = data.images ? data.images.length : 0;
+                    statusEl.innerHTML = '<div class="status success">Found ' + count + ' images for #' + data.hashtag + '. ' + (data.published || 0) + ' crawl tasks published to parallel workers.</div>';
+
+                    if (data.images && data.images.length > 0) {
+                        galleryTitle.textContent = 'Images for #' + data.hashtag;
+                        galleryTitle.style.display = 'block';
+                        data.images.forEach(function(img) {
+                            const item = document.createElement('div');
+                            item.className = 'gallery-item';
+                            item.innerHTML = '<img src="' + img.preview + '" alt="#' + data.hashtag + '" loading="lazy">' +
+                                '<div class="overlay">' +
+                                '<span class="tag">#' + data.hashtag + '</span>' +
+                                '<a class="download-btn" href="' + img.url + '" target="_blank" download>Download</a>' +
+                                '</div>';
+                            gallery.appendChild(item);
+                        });
+                    } else {
+                        emptyState.style.display = 'block';
+                        emptyState.textContent = 'No images found for this hashtag.';
+                    }
+                }
+            } catch (err) {
+                statusEl.innerHTML = '<div class="status error">Request failed: ' + err.message + '</div>';
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Crawl Images';
+        }
+    </script>
 </body>
 </html>
 """
 
 
 # ─── Helper Functions ─────────────────────────────────────────
-def get_images_from_bucket():
-    """List all images in the Cloud Storage bucket."""
+def get_images_from_bucket(hashtag=None):
+    """List images in the Cloud Storage bucket, optionally filtered by hashtag."""
     if not storage or not BUCKET_NAME:
         print("[Frontend] Cloud Storage not available or BUCKET_NAME not set")
         return []
     try:
         client = storage.Client()
         bucket = client.bucket(BUCKET_NAME)
-        blobs = list(bucket.list_blobs(prefix="images/"))
+        prefix = f"images/{hashtag}/" if hashtag else "images/"
+        blobs = list(bucket.list_blobs(prefix=prefix))
         images = []
         for blob in blobs:
             if blob.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
@@ -201,6 +295,7 @@ def get_images_from_bucket():
                 images.append({
                     "name": blob.name,
                     "url": public_url,
+                    "preview": public_url,
                     "hashtag": blob.name.split("/")[1] if len(blob.name.split("/")) > 1 else "unknown",
                 })
         return images
@@ -227,8 +322,9 @@ def fetch_mastodon_hashtag_images(hashtag, limit=20):
         for attachment in status.get("media_attachments", []):
             if attachment.get("type") == "image":
                 img_url = attachment.get("url", "")
+                preview_url = attachment.get("preview_url", img_url)
                 if img_url:
-                    image_urls.append(img_url)
+                    image_urls.append({"url": img_url, "preview": preview_url})
 
     print(f"[Frontend] Found {len(image_urls)} images for #{hashtag_clean}")
     return image_urls
@@ -244,15 +340,15 @@ def publish_crawl_tasks(hashtag, image_urls):
         topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
 
         published = 0
-        for img_url in image_urls:
+        for img in image_urls:
             message_data = json.dumps({
                 "hashtag": hashtag.strip().lstrip("#"),
-                "image_url": img_url,
+                "image_url": img["url"],
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             }).encode("utf-8")
 
             future = publisher.publish(topic_path, message_data)
-            future.result()  # wait for publish confirmation
+            future.result()
             published += 1
 
         print(f"[Frontend] Published {published} crawl tasks to Pub/Sub")
@@ -264,59 +360,40 @@ def publish_crawl_tasks(hashtag, image_urls):
 
 # ─── Cloud Function Entry Point ──────────────────────────────
 def handle_request(request):
-    """HTTP Cloud Function entry point. Serves the web UI and handles crawl requests."""
+    """HTTP Cloud Function entry point."""
     try:
-        hashtag_value = ""
-        status_html = ""
+        # API endpoint: AJAX crawl request
+        action = request.args.get("action", "")
 
-        if request.method == "POST":
-            hashtag = request.form.get("hashtag", "").strip()
-            hashtag_value = hashtag
+        if action == "crawl":
+            hashtag = request.args.get("hashtag", "").strip().lstrip("#")
+            if not hashtag:
+                return json.dumps({"error": "Please enter a hashtag."}), 200, {"Content-Type": "application/json"}
 
-            if hashtag:
-                print(f"[Frontend] Crawl request for: {hashtag}")
+            print(f"[Frontend] Crawl request for: #{hashtag}")
 
-                # Step 1: Query Mastodon for image URLs
-                image_urls = fetch_mastodon_hashtag_images(hashtag)
+            # Query Mastodon for image URLs
+            image_urls = fetch_mastodon_hashtag_images(hashtag)
 
-                if image_urls:
-                    # Step 2: Publish URLs to Pub/Sub for parallel crawling
-                    count = publish_crawl_tasks(hashtag, image_urls)
-                    status_html = f'<div class="status success">Found {len(image_urls)} images for #{hashtag.lstrip("#")}. Published {count} crawl tasks. Images will appear below shortly (refresh in ~10 seconds).</div>'
-                else:
-                    status_html = f'<div class="status error">No images found for #{hashtag.lstrip("#")}. Try a different hashtag.</div>'
-            else:
-                status_html = '<div class="status error">Please enter a hashtag.</div>'
+            if not image_urls:
+                return json.dumps({"error": f"No images found for #{hashtag}. Try a different hashtag.", "hashtag": hashtag}), 200, {"Content-Type": "application/json"}
 
-        # Get existing images from bucket
-        images = get_images_from_bucket()
+            # Publish to Pub/Sub for parallel crawling
+            published = publish_crawl_tasks(hashtag, image_urls)
 
-        # Build gallery HTML
-        if images:
-            gallery_items = []
-            for img in images[-50:]:  # show latest 50
-                gallery_items.append(
-                    f'<div class="gallery-item">'
-                    f'<img src="{img["url"]}" alt="{img["name"]}" loading="lazy">'
-                    f'<span class="label">#{img["hashtag"]}</span>'
-                    f'</div>'
-                )
-            gallery_html = "\n".join(gallery_items)
-            empty_state = ""
-        else:
-            gallery_html = ""
-            empty_state = '<div class="empty-state">No images crawled yet. Enter a hashtag above to start!</div>'
+            # Return image URLs immediately (previews from Mastodon)
+            response = {
+                "hashtag": hashtag,
+                "images": image_urls[:50],
+                "published": published,
+                "total_found": len(image_urls),
+            }
+            return json.dumps(response), 200, {"Content-Type": "application/json"}
 
-        html = (HTML_PAGE
-            .replace("%%HASHTAG_VALUE%%", hashtag_value)
-            .replace("%%STATUS_HTML%%", status_html)
-            .replace("%%GALLERY_HTML%%", gallery_html)
-            .replace("%%EMPTY_STATE%%", empty_state)
-        )
-
-        return html, 200, {"Content-Type": "text/html"}
+        # Default: serve the HTML page
+        return HTML_PAGE, 200, {"Content-Type": "text/html"}
 
     except Exception as e:
         error_msg = traceback.format_exc()
         print(f"[Frontend] ERROR: {error_msg}")
-        return f"<h1>Error</h1><pre>{error_msg}</pre>", 500, {"Content-Type": "text/html"}
+        return json.dumps({"error": f"Server error: {str(e)}"}), 500, {"Content-Type": "application/json"}

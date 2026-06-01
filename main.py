@@ -1,6 +1,5 @@
 """
 Web Scraper Tool - Entry Point
-Run this file to launch the application.
 """
 
 import sys
