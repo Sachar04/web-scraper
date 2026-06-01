@@ -104,15 +104,13 @@ gcloud scheduler jobs delete $SCHEDULER_NAME --location=$REGION --quiet 2>/dev/n
 
 gcloud scheduler jobs create http $SCHEDULER_NAME \
     --location=$REGION \
-    --schedule="*/10 * * * *" \
-    --uri="$FRONTEND_URL" \
-    --http-method=POST \
-    --headers="Content-Type=application/x-www-form-urlencoded" \
-    --body="hashtag=cats" \
-    --description="Auto-crawls #cats every 10 minutes" \
+    --schedule="0 */2 * * *" \
+    --uri="${FRONTEND_URL}?action=scheduled" \
+    --http-method=GET \
+    --description="Auto-crawls top 5 trending Mastodon hashtags every 2 hours" \
     --quiet 2>/dev/null || echo "  Scheduler created (or already exists)."
 
-echo "  Scheduler ready."
+echo "  Scheduler ready (runs every 2 hours, crawls top 5 trending topics)."
 
 echo ""
 echo "═══════════════════════════════════════════════════"
@@ -124,7 +122,7 @@ echo "    1. Cloud Function (Frontend): $FRONTEND_FUNCTION"
 echo "    2. Cloud Function (Crawler):  $CRAWLER_FUNCTION (parallel)"
 echo "    3. Cloud Storage:             gs://$BUCKET_NAME"
 echo "    4. Pub/Sub Topic:             $TOPIC_NAME"
-echo "    5. Cloud Scheduler:           $SCHEDULER_NAME (every 10 min)"
+echo "    5. Cloud Scheduler:           $SCHEDULER_NAME (every 2 hours, top 5 trending)"
 echo "    6. Cloud Logging:             automatic (Logs Explorer)"
 echo ""
 echo "  ╔═══════════════════════════════════════════════╗"

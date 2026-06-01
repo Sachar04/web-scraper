@@ -358,6 +358,40 @@ def publish_crawl_tasks(hashtag, image_urls):
         return 0
 
 
+# ─── Scheduled Crawl (trending topics) ───────────────────────
+def crawl_trending_topics():
+    """Fetch top 5 trending hashtags from Mastodon and crawl images for each."""
+    print("[Scheduler] Fetching trending hashtags from Mastodon...")
+
+    try:
+        resp = requests.get(f"{MASTODON_INSTANCE}/api/v1/trends/tags", params={"limit": 5}, timeout=15)
+        resp.raise_for_status()
+        tags = resp.json()
+    except Exception as e:
+        print(f"[Scheduler] Error fetching trending tags: {e}")
+        return {"error": str(e), "tags_crawled": 0}
+
+    results = []
+    total_published = 0
+    for tag in tags[:5]:
+        tag_name = tag.get("name", "")
+        if not tag_name:
+            continue
+
+        print(f"[Scheduler] Crawling trending tag: #{tag_name}")
+        image_urls = fetch_mastodon_hashtag_images(tag_name, limit=10)
+
+        if image_urls:
+            published = publish_crawl_tasks(tag_name, image_urls)
+            total_published += published
+            results.append({"tag": tag_name, "images_found": len(image_urls), "published": published})
+        else:
+            results.append({"tag": tag_name, "images_found": 0, "published": 0})
+
+    print(f"[Scheduler] Done. Crawled {len(results)} trending tags, published {total_published} tasks.")
+    return {"tags_crawled": len(results), "total_published": total_published, "results": results}
+
+
 # ─── Cloud Function Entry Point ──────────────────────────────
 def handle_request(request):
     """HTTP Cloud Function entry point."""
@@ -389,6 +423,11 @@ def handle_request(request):
                 "total_found": len(image_urls),
             }
             return json.dumps(response), 200, {"Content-Type": "application/json"}
+
+        # Scheduled crawl: triggered by Cloud Scheduler every 2 hours
+        if action == "scheduled":
+            result = crawl_trending_topics()
+            return json.dumps(result), 200, {"Content-Type": "application/json"}
 
         # Default: serve the HTML page
         return HTML_PAGE, 200, {"Content-Type": "text/html"}
