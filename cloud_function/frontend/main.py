@@ -13,11 +13,25 @@ GCP Resources:
 import json
 import os
 import hashlib
+import traceback
 from datetime import datetime
 
 import requests
-from google.cloud import storage, pubsub_v1
-import functions_framework
+
+try:
+    from google.cloud import storage
+except ImportError:
+    storage = None
+
+try:
+    from google.cloud import pubsub_v1
+except ImportError:
+    pubsub_v1 = None
+
+try:
+    import functions_framework
+except ImportError:
+    functions_framework = None
 
 
 # ─── Configuration ────────────────────────────────────────────
@@ -173,6 +187,9 @@ HTML_PAGE = """<!DOCTYPE html>
 # ─── Helper Functions ─────────────────────────────────────────
 def get_images_from_bucket():
     """List all images in the Cloud Storage bucket."""
+    if not storage or not BUCKET_NAME:
+        print("[Frontend] Cloud Storage not available or BUCKET_NAME not set")
+        return []
     try:
         client = storage.Client()
         bucket = client.bucket(BUCKET_NAME)
@@ -180,10 +197,11 @@ def get_images_from_bucket():
         images = []
         for blob in blobs:
             if blob.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                public_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{blob.name}"
                 images.append({
                     "name": blob.name,
-                    "url": blob.public_url,
-                    "hashtag": blob.name.split("/")[1] if "/" in blob.name else "unknown",
+                    "url": public_url,
+                    "hashtag": blob.name.split("/")[1] if len(blob.name.split("/")) > 1 else "unknown",
                 })
         return images
     except Exception as e:
@@ -218,77 +236,87 @@ def fetch_mastodon_hashtag_images(hashtag, limit=20):
 
 def publish_crawl_tasks(hashtag, image_urls):
     """Publish each image URL to Pub/Sub for parallel crawling."""
-    publisher = pubsub_v1.PublisherClient()
-    topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
+    if not pubsub_v1 or not PROJECT_ID:
+        print("[Frontend] Pub/Sub not available or PROJECT_ID not set")
+        return 0
+    try:
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path(PROJECT_ID, PUBSUB_TOPIC)
 
-    published = 0
-    for img_url in image_urls:
-        message_data = json.dumps({
-            "hashtag": hashtag.strip().lstrip("#"),
-            "image_url": img_url,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }).encode("utf-8")
+        published = 0
+        for img_url in image_urls:
+            message_data = json.dumps({
+                "hashtag": hashtag.strip().lstrip("#"),
+                "image_url": img_url,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }).encode("utf-8")
 
-        future = publisher.publish(topic_path, message_data)
-        future.result()  # wait for publish confirmation
-        published += 1
+            future = publisher.publish(topic_path, message_data)
+            future.result()  # wait for publish confirmation
+            published += 1
 
-    print(f"[Frontend] Published {published} crawl tasks to Pub/Sub")
-    return published
+        print(f"[Frontend] Published {published} crawl tasks to Pub/Sub")
+        return published
+    except Exception as e:
+        print(f"[Frontend] Pub/Sub error: {e}")
+        return 0
 
 
 # ─── Cloud Function Entry Point ──────────────────────────────
-@functions_framework.http
 def handle_request(request):
     """HTTP Cloud Function entry point. Serves the web UI and handles crawl requests."""
+    try:
+        hashtag_value = ""
+        status_html = ""
 
-    hashtag_value = ""
-    status_html = ""
-    status_class = ""
+        if request.method == "POST":
+            hashtag = request.form.get("hashtag", "").strip()
+            hashtag_value = hashtag
 
-    if request.method == "POST":
-        hashtag = request.form.get("hashtag", "").strip()
-        hashtag_value = hashtag
+            if hashtag:
+                print(f"[Frontend] Crawl request for: {hashtag}")
 
-        if hashtag:
-            print(f"[Frontend] Crawl request for: {hashtag}")
+                # Step 1: Query Mastodon for image URLs
+                image_urls = fetch_mastodon_hashtag_images(hashtag)
 
-            # Step 1: Query Mastodon for image URLs
-            image_urls = fetch_mastodon_hashtag_images(hashtag)
-
-            if image_urls:
-                # Step 2: Publish URLs to Pub/Sub for parallel crawling
-                count = publish_crawl_tasks(hashtag, image_urls)
-                status_html = f'<div class="status success">Found {len(image_urls)} images for #{hashtag.lstrip("#")}. Published {count} crawl tasks. Images will appear below shortly (refresh in ~10 seconds).</div>'
+                if image_urls:
+                    # Step 2: Publish URLs to Pub/Sub for parallel crawling
+                    count = publish_crawl_tasks(hashtag, image_urls)
+                    status_html = f'<div class="status success">Found {len(image_urls)} images for #{hashtag.lstrip("#")}. Published {count} crawl tasks. Images will appear below shortly (refresh in ~10 seconds).</div>'
+                else:
+                    status_html = f'<div class="status error">No images found for #{hashtag.lstrip("#")}. Try a different hashtag.</div>'
             else:
-                status_html = f'<div class="status error">No images found for #{hashtag.lstrip("#")}. Try a different hashtag.</div>'
+                status_html = '<div class="status error">Please enter a hashtag.</div>'
+
+        # Get existing images from bucket
+        images = get_images_from_bucket()
+
+        # Build gallery HTML
+        if images:
+            gallery_items = []
+            for img in images[-50:]:  # show latest 50
+                gallery_items.append(
+                    f'<div class="gallery-item">'
+                    f'<img src="{img["url"]}" alt="{img["name"]}" loading="lazy">'
+                    f'<span class="label">#{img["hashtag"]}</span>'
+                    f'</div>'
+                )
+            gallery_html = "\n".join(gallery_items)
+            empty_state = ""
         else:
-            status_html = '<div class="status error">Please enter a hashtag.</div>'
+            gallery_html = ""
+            empty_state = '<div class="empty-state">No images crawled yet. Enter a hashtag above to start!</div>'
 
-    # Get existing images from bucket
-    images = get_images_from_bucket()
+        html = HTML_PAGE.format(
+            hashtag_value=hashtag_value,
+            status_html=status_html,
+            gallery_html=gallery_html,
+            empty_state=empty_state,
+        )
 
-    # Build gallery HTML
-    if images:
-        gallery_items = []
-        for img in images[-50:]:  # show latest 50
-            gallery_items.append(
-                f'<div class="gallery-item">'
-                f'<img src="{img["url"]}" alt="{img["name"]}" loading="lazy">'
-                f'<span class="label">#{img["hashtag"]}</span>'
-                f'</div>'
-            )
-        gallery_html = "\n".join(gallery_items)
-        empty_state = ""
-    else:
-        gallery_html = ""
-        empty_state = '<div class="empty-state">No images crawled yet. Enter a hashtag above to start!</div>'
+        return html, 200, {"Content-Type": "text/html"}
 
-    html = HTML_PAGE.format(
-        hashtag_value=hashtag_value,
-        status_html=status_html,
-        gallery_html=gallery_html,
-        empty_state=empty_state,
-    )
-
-    return html, 200, {"Content-Type": "text/html"}
+    except Exception as e:
+        error_msg = traceback.format_exc()
+        print(f"[Frontend] ERROR: {error_msg}")
+        return f"<h1>Error</h1><pre>{error_msg}</pre>", 500, {"Content-Type": "text/html"}
